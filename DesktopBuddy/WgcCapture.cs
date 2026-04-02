@@ -37,6 +37,9 @@ public sealed class WgcCapture : IDisposable
     [DllImport("user32.dll")]
     private static extern bool IsWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
     // D3D11 native interop
     [DllImport("d3d11.dll", EntryPoint = "D3D11CreateDevice")]
     private static extern int D3D11CreateDevice(
@@ -126,7 +129,7 @@ public sealed class WgcCapture : IDisposable
     public int Width { get; private set; }
     public int Height { get; private set; }
     public int FramesCaptured => _framesCaptured;
-    public bool IsValid => !_disposed && !_closed && _item != null && (_isDesktop || IsWindow(_hwnd));
+    public bool IsValid => !_disposed && !_closed && _item != null && (_isDesktop || (IsWindow(_hwnd) && !IsIconic(_hwnd)));
 
     /// <summary>
     /// Initialize WGC capture for a window (hwnd) or entire desktop (hwnd=IntPtr.Zero uses primary monitor).

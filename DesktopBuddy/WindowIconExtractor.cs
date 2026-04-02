@@ -1,10 +1,14 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
+using ResoniteModLoader;
 
 namespace DesktopBuddy;
 
 /// <summary>
 /// Extracts window icons as RGBA pixel data via Win32.
+/// GetIconRGBA: small icon (32x32) for context menu.
+/// GetLargeIconRGBA: high-res icon (up to 256x256) via PrivateExtractIcons from the exe.
 /// </summary>
 public static class WindowIconExtractor
 {
@@ -33,6 +37,28 @@ public static class WindowIconExtractor
     [DllImport("gdi32.dll")]
     private static extern bool DeleteObject(IntPtr hObject);
 
+    [DllImport("user32.dll")]
+    private static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    // PrivateExtractIcons: extracts icons at any requested size from an exe/dll/ico file
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint PrivateExtractIconsW(
+        string szFileName, int nIconIndex, int cxIcon, int cyIcon,
+        IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags);
+
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const uint WM_GETICON = 0x007F;
     private const int ICON_BIG = 1;
     private const int ICON_SMALL2 = 2;
@@ -73,7 +99,7 @@ public static class WindowIconExtractor
     }
 
     /// <summary>
-    /// Extract a window's icon as RGBA pixels. Returns null if no icon found.
+    /// Extract a window's small icon (typically 32x32) as RGBA pixels. For context menu use.
     /// </summary>
     public static byte[] GetIconRGBA(IntPtr hwnd, out int width, out int height)
     {
@@ -89,8 +115,71 @@ public static class WindowIconExtractor
         if (hIcon == IntPtr.Zero)
             return null;
 
+        return ExtractIconPixels(hIcon, out width, out height, destroyIcon: false);
+    }
+
+    /// <summary>
+    /// Extract a high-resolution icon (128x128) for the window's process exe. For back panel use.
+    /// Falls back to GetIconRGBA if exe icon extraction fails.
+    /// </summary>
+    public static byte[] GetLargeIconRGBA(IntPtr hwnd, out int width, out int height, int requestedSize = 128)
+    {
+        width = height = 0;
+        if (hwnd == IntPtr.Zero) return null;
+
+        try
+        {
+            // Get the exe path from the window's process
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            if (pid == 0) return GetIconRGBA(hwnd, out width, out height);
+
+            IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (hProc == IntPtr.Zero) return GetIconRGBA(hwnd, out width, out height);
+
+            var sb = new StringBuilder(1024);
+            uint size = (uint)sb.Capacity;
+            bool ok = QueryFullProcessImageNameW(hProc, 0, sb, ref size);
+            CloseHandle(hProc);
+
+            if (!ok || size == 0) return GetIconRGBA(hwnd, out width, out height);
+
+            string exePath = sb.ToString();
+            ResoniteMod.Msg($"[IconExtractor] Exe path for hwnd={hwnd}: {exePath}");
+
+            // Extract icon at requested size from the exe
+            var icons = new IntPtr[1];
+            var ids = new uint[1];
+            uint count = PrivateExtractIconsW(exePath, 0, requestedSize, requestedSize, icons, ids, 1, 0);
+            if (count == 0 || icons[0] == IntPtr.Zero)
+            {
+                ResoniteMod.Msg($"[IconExtractor] PrivateExtractIcons returned 0, falling back to WM_GETICON");
+                return GetIconRGBA(hwnd, out width, out height);
+            }
+
+            ResoniteMod.Msg($"[IconExtractor] Extracted {requestedSize}x{requestedSize} icon from exe");
+            var result = ExtractIconPixels(icons[0], out width, out height, destroyIcon: true);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            ResoniteMod.Msg($"[IconExtractor] Large icon error: {ex.Message}");
+            return GetIconRGBA(hwnd, out width, out height);
+        }
+    }
+
+    /// <summary>
+    /// Convert an HICON to RGBA pixel data.
+    /// </summary>
+    private static byte[] ExtractIconPixels(IntPtr hIcon, out int width, out int height, bool destroyIcon)
+    {
+        width = height = 0;
+        if (hIcon == IntPtr.Zero) return null;
+
         if (!GetIconInfo(hIcon, out ICONINFO iconInfo))
+        {
+            if (destroyIcon) DestroyIcon(hIcon);
             return null;
+        }
 
         try
         {
@@ -143,6 +232,7 @@ public static class WindowIconExtractor
         {
             if (iconInfo.hbmColor != IntPtr.Zero) DeleteObject(iconInfo.hbmColor);
             if (iconInfo.hbmMask != IntPtr.Zero) DeleteObject(iconInfo.hbmMask);
+            if (destroyIcon) DestroyIcon(hIcon);
         }
     }
 }

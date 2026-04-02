@@ -37,6 +37,10 @@
       <HintPath>$(ResonitePath)\SkyFrost.Base.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="SkyFrost.Base.Models">
+      <HintPath>$(ResonitePath)\SkyFrost.Base.Models.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Renderite.Shared">
       <HintPath>$(ResonitePath)\Renderite.Shared.dll</HintPath>
       <Private>false</Private>

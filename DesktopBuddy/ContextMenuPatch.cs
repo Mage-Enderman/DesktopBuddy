@@ -20,12 +20,21 @@ public static class ContextMenuPatch
     // Cache: SHA256 of icon pixel data → local:// asset URI
     private static readonly ConcurrentDictionary<string, Uri> _iconCache = new();
 
-    private static readonly string[] IgnoredTitles = { "Resonite", "vrmonitor", "SteamVR Status" };
+    // Cached desktop icon URI (generated once)
+    private static Uri _desktopIconUri;
+    private static bool _desktopIconGenerated;
+
+    // Exact titles to hide (case-insensitive exact match)
+    private static readonly string[] IgnoredExactTitles = { "Resonite" };
+    // Substrings to hide (case-insensitive contains)
+    private static readonly string[] IgnoredSubstrings = { "vrmonitor", "SteamVR Status", "rainmeter" };
+
     private static bool ShouldIgnore(string title)
     {
-        foreach (var ignored in IgnoredTitles)
-            if (title.Contains(ignored, StringComparison.OrdinalIgnoreCase)) return true;
-        if (title.Contains("rainmeter", StringComparison.OrdinalIgnoreCase)) return true;
+        foreach (var exact in IgnoredExactTitles)
+            if (title.Equals(exact, StringComparison.OrdinalIgnoreCase)) return true;
+        foreach (var sub in IgnoredSubstrings)
+            if (title.Contains(sub, StringComparison.OrdinalIgnoreCase)) return true;
         return false;
     }
 
@@ -76,10 +85,115 @@ public static class ContextMenuPatch
     }
 
     /// <summary>
-    /// Get a local:// URI for a window icon. Cached by pixel hash.
-    /// Blocks until saved on first call, instant on subsequent calls.
+    /// Generate a simple 32x32 monitor icon as RGBA bytes.
+    /// Blue screen with dark border, small stand at bottom.
     /// </summary>
-    private static Uri GetIconUri(IntPtr hwnd, Engine engine)
+    private static byte[] GenerateDesktopIcon(int size = 32)
+    {
+        var pixels = new byte[size * size * 4];
+        var border = new byte[] { 40, 40, 50, 255 };     // dark gray border
+        var screen = new byte[] { 60, 140, 220, 255 };    // blue screen
+        var stand  = new byte[] { 80, 80, 90, 255 };      // stand color
+
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                int idx = (y * size + x) * 4;
+                byte[] color;
+
+                // Monitor body: rows 2-22, cols 2-29
+                if (y >= 2 && y <= 22 && x >= 2 && x <= 29)
+                {
+                    // Border (outer 2px)
+                    if (y <= 3 || y >= 21 || x <= 3 || x >= 28)
+                        color = border;
+                    else
+                        color = screen;
+                }
+                // Stand neck: rows 23-25, cols 13-18
+                else if (y >= 23 && y <= 25 && x >= 13 && x <= 18)
+                {
+                    color = stand;
+                }
+                // Stand base: rows 26-27, cols 10-21
+                else if (y >= 26 && y <= 27 && x >= 10 && x <= 21)
+                {
+                    color = stand;
+                }
+                else
+                {
+                    // Transparent
+                    pixels[idx] = 0; pixels[idx + 1] = 0; pixels[idx + 2] = 0; pixels[idx + 3] = 0;
+                    continue;
+                }
+
+                pixels[idx]     = color[0]; // R
+                pixels[idx + 1] = color[1]; // G
+                pixels[idx + 2] = color[2]; // B
+                pixels[idx + 3] = color[3]; // A
+            }
+        }
+        return pixels;
+    }
+
+    /// <summary>
+    /// Get a StaticTexture2D with the desktop icon. Generates and caches on first call.
+    /// </summary>
+    private static StaticTexture2D GetDesktopIconTexture(Engine engine, Slot slot)
+    {
+        try
+        {
+            var tex = slot.AttachComponent<StaticTexture2D>();
+
+            if (_desktopIconGenerated && _desktopIconUri != null)
+            {
+                tex.URL.Value = _desktopIconUri;
+                DesktopBuddyMod.Msg("[Icon] Using cached desktop icon");
+                return tex;
+            }
+
+            DesktopBuddyMod.Msg("[Icon] Generating desktop icon bitmap");
+            var iconData = GenerateDesktopIcon(32);
+            var capturedTex = tex;
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    var bitmap = new Bitmap2D(iconData, 32, 32,
+                        Renderite.Shared.TextureFormat.RGBA32, false, Renderite.Shared.ColorProfile.sRGB, false);
+                    var uri = await engine.LocalDB.SaveAssetAsync(bitmap).ConfigureAwait(false);
+                    if (uri != null)
+                    {
+                        _desktopIconUri = uri;
+                        _desktopIconGenerated = true;
+                        DesktopBuddyMod.Msg($"[Icon] Desktop icon saved: {uri}");
+                        capturedTex.World.RunInUpdates(0, () =>
+                        {
+                            if (!capturedTex.IsDestroyed)
+                                capturedTex.URL.Value = uri;
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DesktopBuddyMod.Msg($"[Icon] Desktop icon save error: {ex.Message}");
+                }
+            });
+            return tex;
+        }
+        catch (Exception ex)
+        {
+            DesktopBuddyMod.Msg($"[Icon] Desktop icon error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Get or create icon texture for a window.
+    /// </summary>
+    private static StaticTexture2D GetIconTexture(IntPtr hwnd, Engine engine, Slot slot)
     {
         try
         {
@@ -87,18 +201,43 @@ public static class ContextMenuPatch
             if (iconData == null || w <= 0 || h <= 0) return null;
 
             var hash = Convert.ToHexString(SHA256.HashData(iconData));
-            if (_iconCache.TryGetValue(hash, out var cached))
-                return cached;
 
-            var bitmap = new Bitmap2D(iconData, w, h,
-                Renderite.Shared.TextureFormat.RGBA32, false, Renderite.Shared.ColorProfile.sRGB, false);
-            var uri = engine.LocalDB.SaveAssetAsync(bitmap).GetAwaiter().GetResult();
-            if (uri != null)
+            var tex = slot.AttachComponent<StaticTexture2D>();
+
+            if (_iconCache.TryGetValue(hash, out var cached))
             {
-                _iconCache[hash] = uri;
-                DesktopBuddyMod.Msg($"[Icon] Cached {w}x{h} -> {uri}");
+                tex.URL.Value = cached;
+                return tex;
             }
-            return uri;
+
+            var capturedData = iconData;
+            var capturedW = w;
+            var capturedH = h;
+            var capturedHash = hash;
+            var capturedTex = tex;
+            Task.Run(async () =>
+            {
+                try
+                {
+                    var bitmap = new Bitmap2D(capturedData, capturedW, capturedH,
+                        Renderite.Shared.TextureFormat.RGBA32, false, Renderite.Shared.ColorProfile.sRGB, false);
+                    var uri = await engine.LocalDB.SaveAssetAsync(bitmap).ConfigureAwait(false);
+                    if (uri != null)
+                    {
+                        _iconCache[capturedHash] = uri;
+                        capturedTex.World.RunInUpdates(0, () =>
+                        {
+                            if (!capturedTex.IsDestroyed)
+                                capturedTex.URL.Value = uri;
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DesktopBuddyMod.Msg($"[Icon] Save error: {ex.Message}");
+                }
+            });
+            return tex;
         }
         catch (Exception ex)
         {
@@ -109,17 +248,30 @@ public static class ContextMenuPatch
 
     public static void Postfix(ContextMenu __instance)
     {
+        DesktopBuddyMod.Msg("[ContextMenu] Postfix fired, adding Desktop item");
         LocaleString label = "Desktop";
         colorX? color = colorX.Cyan;
-        var item = __instance.AddItem(in label, (Uri)null!, in color);
+
+        // Add desktop icon to the top-level menu item
+        var engine = __instance.World.Engine;
+        var iconTex = GetDesktopIconTexture(engine, __instance.Slot);
+
+        ContextMenuItem item;
+        if (iconTex != null)
+            item = __instance.AddItem(in label, (IAssetProvider<ITexture2D>)iconTex, in color);
+        else
+            item = __instance.AddItem(in label, (Uri)null!, in color);
+
         item.Button.LocalPressed += (IButton btn, ButtonEventData data) =>
         {
+            DesktopBuddyMod.Msg("[ContextMenu] Desktop item pressed, showing picker");
             ShowPickerPage(__instance, 0);
         };
     }
 
     private static void ShowPickerPage(ContextMenu menu, int page)
     {
+        DesktopBuddyMod.Msg($"[ContextMenu] ShowPickerPage page={page}");
         ClearMenu(menu);
         var world = menu.World;
         var engine = world.Engine;
@@ -129,6 +281,7 @@ public static class ContextMenuPatch
 
         // Monitors
         var monitors = GetMonitors();
+        DesktopBuddyMod.Msg($"[ContextMenu] Found {monitors.Count} monitors");
         for (int i = 0; i < monitors.Count; i++)
         {
             var mon = monitors[i];
@@ -141,6 +294,7 @@ public static class ContextMenuPatch
 
         // Windows
         var allWindows = WindowEnumerator.GetOpenWindows();
+        DesktopBuddyMod.Msg($"[ContextMenu] Found {allWindows.Count} windows");
         foreach (var win in allWindows)
         {
             if (ShouldIgnore(win.Title)) continue;
@@ -157,6 +311,8 @@ public static class ContextMenuPatch
         int start = page * PAGE_SIZE;
         int end = Math.Min(start + PAGE_SIZE, entries.Count);
 
+        DesktopBuddyMod.Msg($"[ContextMenu] Showing entries {start}-{end} of {entries.Count} (page {page + 1}/{totalPages})");
+
         for (int i = start; i < end; i++)
         {
             var entry = entries[i];
@@ -164,12 +320,15 @@ public static class ContextMenuPatch
             colorX? c = entry.color;
             var act = entry.action;
 
-            // Use cached icon URI if available, kick off background cache if not
-            Uri iconUri = null;
+            StaticTexture2D iconTex = null;
             if (entry.hwnd != IntPtr.Zero)
-                iconUri = GetIconUri(entry.hwnd, engine);
+                iconTex = GetIconTexture(entry.hwnd, engine, menu.Slot);
 
-            var mi = menu.AddItem(in lbl, iconUri, in c);
+            ContextMenuItem mi;
+            if (iconTex != null)
+                mi = menu.AddItem(in lbl, (IAssetProvider<ITexture2D>)iconTex, in c);
+            else
+                mi = menu.AddItem(in lbl, (Uri)null!, in c);
             mi.Button.LocalPressed += (IButton b, ButtonEventData d) => act();
         }
 

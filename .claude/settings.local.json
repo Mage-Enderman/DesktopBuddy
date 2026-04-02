@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command \"Compress-Archive -Path release/* -DestinationPath release/DesktopBuddy.zip -Force\")"
+    ]
+  }
+}
