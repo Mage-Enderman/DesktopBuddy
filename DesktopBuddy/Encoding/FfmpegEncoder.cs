@@ -194,7 +194,14 @@ public sealed unsafe class FfmpegEncoder : IDisposable
             _width = width & ~1u;
             _height = height & ~1u;
 
-            ResoniteMod.Msg($"[FfmpegEnc:{_streamId}] Initializing: {width}x{height} @ {_fps}fps");
+            // GPU encoders have minimum dimension requirements (NVENC: 32px, AMF: 64px)
+            if (_width < 64 || _height < 64)
+            {
+                ResoniteMod.Msg($"[FfmpegEnc:{_streamId}] Window too small for encoding: {_width}x{_height} (min 64x64)");
+                _initFailed = true; return false;
+            }
+
+            ResoniteMod.Msg($"[FfmpegEnc:{_streamId}] Initializing: {_width}x{_height} @ {_fps}fps");
 
             // Try GPU-accelerated encoders: NVENC (NVIDIA) > AMF (AMD)
             // QSV (Intel) excluded — requires AV_HWDEVICE_TYPE_QSV + AV_PIX_FMT_QSV, incompatible with our D3D11VA setup
@@ -234,10 +241,10 @@ public sealed unsafe class FfmpegEncoder : IDisposable
                 _codecCtx->rc_max_rate = 12_000_000;
                 _codecCtx->rc_buffer_size = 8_000_000;
 
-                // NVENC accepts BGRA as sw_format; AMF and QSV require NV12
-                var swFormat = name.Contains("nvenc")
-                    ? AVPixelFormat.AV_PIX_FMT_BGRA
-                    : AVPixelFormat.AV_PIX_FMT_NV12;
+                // Use BGRA sw_format for all encoders — matches WGC capture's BGRA textures.
+                // CopySubresourceRegion does a raw bit copy, so formats must match.
+                // NVENC natively accepts BGRA. AMF converts BGRA→NV12 internally.
+                var swFormat = AVPixelFormat.AV_PIX_FMT_BGRA;
                 SetupHardwareContext(d3dDevice, swFormat);
 
                 AVDictionary* opts = null;

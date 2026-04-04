@@ -278,6 +278,18 @@ public class DesktopBuddyMod : ResoniteMod
         DesktopCanvasIds.Add(ui.Canvas.ReferenceID);
         Msg($"[StartStreaming] Registered canvas {ui.Canvas.ReferenceID} for locomotion suppression");
 
+        // Snapshot existing child windows so we only track NEW popups, not pre-existing ones
+        if (!isChild && processId != 0)
+        {
+            foreach (var existing in WindowEnumerator.GetProcessWindows(processId))
+            {
+                if (existing.Handle != hwnd)
+                    session.TrackedChildHwnds.Add(existing.Handle);
+            }
+            if (session.TrackedChildHwnds.Count > 0)
+                Msg($"[StartStreaming] Pre-existing child windows ignored: {session.TrackedChildHwnds.Count}");
+        }
+
         // --- Input event handlers ---
 
         // Helper: check if this source should control the mouse hover
