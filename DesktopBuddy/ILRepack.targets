@@ -13,7 +13,7 @@
       InputAssemblies="@(InputAssemblies)"
       TargetKind="SameAsPrimaryAssembly"
       OutputFile="$(OutputPath)$(TargetName)$(TargetExt)"
-      LibraryPath="$(OutputPath);$(ResonitePath);$(ResonitePath)\Libraries"
+      LibraryPath="$(OutputPath);$(LibPath)"
     />
 
     <Message Text="[ILRepack] Merged dependencies into $(TargetName)$(TargetExt)" Importance="high" />
