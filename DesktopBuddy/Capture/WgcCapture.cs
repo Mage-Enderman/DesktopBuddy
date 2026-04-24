@@ -157,6 +157,9 @@ public sealed class WgcCapture : IDisposable
     private IntPtr _d3dContext;
     private GraphicsCaptureItem _item;
     private Direct3D11CaptureFramePool _framePool;
+    private GraphicsCaptureSession _session;
+    private IDisposable _lastSurfaceObj;
+
     private static readonly System.Collections.Concurrent.ConcurrentBag<object> _immortalWinRtObjects = new();
 
     private volatile bool _closed;
