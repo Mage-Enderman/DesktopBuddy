@@ -313,6 +313,7 @@ public sealed class WgcCapture : IDisposable
         var ptr = interop.CreateForWindow(hwnd, ref itemGuid);
         var item = MarshalInterface<GraphicsCaptureItem>.FromAbi(ptr);
         Marshal.Release(ptr);
+        Marshal.ReleaseComObject(interop);
         return item;
     }
 
@@ -327,6 +328,7 @@ public sealed class WgcCapture : IDisposable
         var ptr = interop.CreateForMonitor(hmon, ref itemGuid);
         var item = MarshalInterface<GraphicsCaptureItem>.FromAbi(ptr);
         Marshal.Release(ptr);
+        Marshal.ReleaseComObject(interop);
         return item;
     }
 
@@ -493,12 +495,12 @@ public sealed class WgcCapture : IDisposable
         _d3dContext = IntPtr.Zero;
         _d3dDevice = IntPtr.Zero;
 
+        if (wDevice != null) GC.SuppressFinalize(wDevice);
+        if (rItem != null) GC.SuppressFinalize(rItem);
+
         System.Threading.Tasks.Task.Run(async () => 
         {
             await System.Threading.Tasks.Task.Delay(2000);
-            
-            try { (wDevice as IDisposable)?.Dispose(); } catch { }
-            if (rItem != null) GC.SuppressFinalize(rItem);
             
             bool forceGC = DesktopBuddyMod.Config?.GetValue(DesktopBuddyMod.ImmediateGC) ?? true;
             if (forceGC)
