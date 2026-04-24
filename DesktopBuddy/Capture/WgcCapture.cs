@@ -177,21 +177,21 @@ public sealed class WgcCapture : IDisposable
     public void RecreatePoolIfNeeded()
     {
         if (!_needsPoolRecreate || _disposed) return;
-        lock (_disposeLock)
+        try
         {
-            if (!_needsPoolRecreate || _disposed) return;
-            try
+            var pool = _framePool;
+            if (pool != null && !_disposed)
             {
-                _framePool?.Recreate(_winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2,
+                pool.Recreate(_winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2,
                     new SizeInt32 { Width = Width, Height = Height });
-                _needsPoolRecreate = false;
                 Log.Msg($"[WgcCapture] FramePool recreated for {Width}x{Height}");
             }
-            catch (Exception ex)
-            {
-                _needsPoolRecreate = false;
-                Log.Msg($"[WgcCapture] FramePool.Recreate failed: {ex.Message}");
-            }
+            _needsPoolRecreate = false;
+        }
+        catch (Exception ex)
+        {
+            _needsPoolRecreate = false;
+            Log.Msg($"[WgcCapture] FramePool.Recreate failed: {ex.Message}");
         }
     }
 
