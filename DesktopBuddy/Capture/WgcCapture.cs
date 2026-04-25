@@ -168,6 +168,7 @@ public sealed class WgcCapture : IDisposable
     
     private System.Threading.Thread _pollingThread;
     private volatile bool _needsPoolRecreate;
+    private readonly object _poolLock = new();
 
     private static readonly Guid DxgiAccessGuid = new("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1");
     private static readonly Guid TexGuid = new("6f15aaf2-d208-4e89-9ab4-489535d34f9c");
@@ -183,14 +184,17 @@ public sealed class WgcCapture : IDisposable
         if (!_needsPoolRecreate || _disposed) return;
         try
         {
-            var pool = _framePool;
-            if (pool != null && !_disposed)
+            lock (_poolLock)
             {
-                pool.Recreate(_winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2,
-                    new SizeInt32 { Width = Width, Height = Height });
-                Log.Msg($"[WgcCapture] FramePool recreated for {Width}x{Height}");
+                var pool = _framePool;
+                if (pool != null && !_disposed)
+                {
+                    pool.Recreate(_winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2,
+                        new SizeInt32 { Width = Width, Height = Height });
+                    Log.Msg($"[WgcCapture] FramePool recreated for {Width}x{Height}");
+                }
+                _needsPoolRecreate = false;
             }
-            _needsPoolRecreate = false;
         }
         catch (Exception ex)
         {
@@ -347,13 +351,15 @@ public sealed class WgcCapture : IDisposable
         {
             try
             {
-                if (_framePool == null)
+                Windows.Graphics.Capture.Direct3D11CaptureFrame frame = null;
+                lock (_poolLock)
                 {
-                    System.Threading.Thread.Sleep(5);
-                    continue;
+                    if (_framePool != null && !_disposed && !_needsPoolRecreate)
+                    {
+                        frame = _framePool.TryGetNextFrame();
+                    }
                 }
 
-                var frame = _framePool.TryGetNextFrame();
                 if (frame == null)
                 {
                     System.Threading.Thread.Sleep(1);
@@ -365,28 +371,28 @@ public sealed class WgcCapture : IDisposable
                     var size = frame.ContentSize;
                     int w = size.Width;
                     int h = size.Height;
-                    if (w <= 0 || h <= 0) return;
+                    if (w <= 0 || h <= 0) continue;
 
-                    if (_needsPoolRecreate) return;
+                    if (_needsPoolRecreate) continue;
 
                     if (w != Width || h != Height)
                     {
                         Log.Msg($"[WgcCapture] Resize {Width}x{Height} -> {w}x{h}");
                         Width = w; Height = h;
                         _needsPoolRecreate = true;
-                        return;
+                        continue;
                     }
 
                     var surfaceObj = frame.Surface;
                     try
                     {
                         IntPtr surfaceAbi = MarshalInterface<IDirect3DSurface>.FromManaged(surfaceObj);
-                        if (surfaceAbi == IntPtr.Zero) return;
+                        if (surfaceAbi == IntPtr.Zero) continue;
 
                         var dxgiAccessGuid = DxgiAccessGuid;
                         int qiHr = Marshal.QueryInterface(surfaceAbi, ref dxgiAccessGuid, out IntPtr dxgiAccessPtr);
                         Marshal.Release(surfaceAbi);
-                        if (qiHr < 0 || dxgiAccessPtr == IntPtr.Zero) return;
+                        if (qiHr < 0 || dxgiAccessPtr == IntPtr.Zero) continue;
 
                         IntPtr srcTexture = IntPtr.Zero;
                         try
@@ -406,7 +412,7 @@ public sealed class WgcCapture : IDisposable
                             Marshal.Release(dxgiAccessPtr);
                         }
 
-                        if (srcTexture == IntPtr.Zero) return;
+                        if (srcTexture == IntPtr.Zero) continue;
 
                         try
                         {
@@ -488,21 +494,17 @@ public sealed class WgcCapture : IDisposable
         }
         Log.Msg($"[WgcCapture:StopCapture] Stopping session hwnd={_hwnd}");
 
-        var lso = _lastSurfaceObj;
+        if (_pollingThread != null && _pollingThread.IsAlive)
+        {
+            _pollingThread.Join(500);
+        }
+
+        // Only dispose the session. This tells DWM to stop the capture and removes the yellow border.
         var s = _session;
-        var f = _framePool;
-
-        try { lso?.Dispose(); } catch { }
-        if (lso != null) GC.SuppressFinalize(lso);
-        _lastSurfaceObj = null;
-
         try { s?.Dispose(); } catch { }
         if (s != null) GC.SuppressFinalize(s);
         _session = null;
 
-        try { f?.Dispose(); } catch { }
-        if (f != null) GC.SuppressFinalize(f);
-        _framePool = null;
         Log.Msg("[WgcCapture:StopCapture] Session stopped, events unhooked");
     }
 
@@ -520,65 +522,51 @@ public sealed class WgcCapture : IDisposable
             Log.Msg($"[WgcCapture:Dispose] Disposing resources");
             _closed = true;
 
-            var lso = _lastSurfaceObj;
-            var s = _session;
-            var f = _framePool;
+            if (_pollingThread != null && _pollingThread.IsAlive)
+            {
+                _pollingThread.Join(500);
+            }
 
-            try { lso?.Dispose(); } catch { }
-            if (lso != null) GC.SuppressFinalize(lso);
-            _lastSurfaceObj = null;
-
-            try { s?.Dispose(); } catch { }
-            if (s != null) GC.SuppressFinalize(s);
+            var sToDispose = _session;
+            try { sToDispose?.Dispose(); } catch { }
+            if (sToDispose != null) GC.SuppressFinalize(sToDispose);
             _session = null;
-
-            try { f?.Dispose(); } catch { }
-            if (f != null) GC.SuppressFinalize(f);
-            _framePool = null;
         }
         
         // Start delayed asynchronous native teardown
         // Wait 2 seconds to allow Desktop Window Manager (DWM) to asynchronously conclude
         // session shutdown, THEN safely dispose the internal WinRT proxies and D3D references.
         // This completely prevents both immediate DWM crashes AND delayed background GC crashes.
+        var lso = _lastSurfaceObj;
+        var s = _session;
+        var f = _framePool;
         var wDevice = _winrtDevice;
         var rItem = _item;
         var dCtx = _d3dContext;
         var dDev = _d3dDevice;
         
+        _lastSurfaceObj = null;
+        _session = null;
+        _framePool = null;
         _item = null;
         _winrtDevice = null;
         _d3dContext = IntPtr.Zero;
         _d3dDevice = IntPtr.Zero;
-
-        if (wDevice != null) 
-        {
-            try { (wDevice as IDisposable)?.Dispose(); } catch { }
-            GC.SuppressFinalize(wDevice);
-        }
         
         if (rItem != null) 
         {
-            // GraphicsCaptureItem doesn't implement IDisposable, so we cannot dispose its internal IObjectReference.
-            // To prevent the GC from finalizing the internal COM reference on the MTA thread and causing an Access Violation,
-            // we must keep the wrapper alive forever.
             GC.SuppressFinalize(rItem);
             _immortalWinRtObjects.Add(rItem);
         }
 
-        System.Threading.Tasks.Task.Run(async () => 
-        {
-            await System.Threading.Tasks.Task.Delay(3000);
-            
-            bool forceGC = DesktopBuddyMod.Config?.GetValue(DesktopBuddyMod.ImmediateGC) ?? true;
-            if (forceGC)
-            {
-                Log.Msg($"[WgcCapture:Dispose] Skipping forced GC collection (now safely handled)");
-            }
-            
-            if (dCtx != IntPtr.Zero) { Marshal.Release(dCtx); }
-            if (dDev != IntPtr.Zero) { Marshal.Release(dDev); }
-            Log.Msg($"[WgcCapture:Dispose] Delayed native D3D device teardown complete");
-        });
+        // We MUST NOT dispose the FramePool (f) or the D3D device (wDevice, dCtx, dDev).
+        // Disposing the FramePool while DWM is still asynchronously delivering frames causes a fatal 0xc0000409 FailFast.
+        // Destroying the D3D device early causes FFmpeg to crash with 0xc0000005 in av_buffer_unref.
+        // By making them immortal, we accept a tiny VRAM leak to guarantee 100% stability across all background threads.
+        if (lso != null) { GC.SuppressFinalize(lso); _immortalWinRtObjects.Add(lso); }
+        if (f != null) { GC.SuppressFinalize(f); _immortalWinRtObjects.Add(f); }
+        if (wDevice != null) { GC.SuppressFinalize(wDevice); _immortalWinRtObjects.Add(wDevice); }
+
+        Log.Msg($"[WgcCapture:Dispose] Cleanup complete. FramePool and Device kept immortal to prevent DWM/FFmpeg crashes.");
     }
 }
